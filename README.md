@@ -1,6 +1,6 @@
-# Home Assistant Github sync for Automations & Scripts
+# Home Assistant Automation & Script Sync
 
-This is a small set of scripts that keeps your Home Assistant **automations** and **scripts** backed up to GitHub automatically, in a way that's easy to browse, easy to review, and — if you want — easy to let an AI assistant edit directly on GitHub.
+This is a small set of scripts that keeps your Home Assistant **automations** and **scripts** backed up to GitHub automatically, in a way that's easy to browse, easy to review, and easy to let an AI assistant edit directly on GitHub — **without ever losing the ability to edit them normally in the Home Assistant UI.**
 
 It was built for one specific setup, not as a general-purpose plugin, so read through this before installing it. It assumes you're reasonably comfortable copying and pasting terminal commands, even if you're not a programmer.
 
@@ -25,32 +25,34 @@ Home Assistant normally stores every automation you create in one giant file (`a
 - Look at a clean history of *one automation at a time*, instead of one giant file where everything is mixed together.
 - Let an AI assistant (or a collaborator) edit individual automations or scripts as separate files on GitHub, without wading through everything else.
 
-This project splits your automations and scripts into **one file per automation/script**, keeps that split copy in sync with GitHub, and automatically merges any changes back into Home Assistant. It runs on a schedule (once an hour, by default) with no ongoing effort from you.
+This project splits your automations and scripts into **one file per automation/script** on GitHub, while your actual Home Assistant installation keeps using the single files it always has. The two stay in sync automatically, in both directions, on a schedule (once an hour, by default) with no ongoing effort from you.
+
+**The core goal: you can keep editing automations and scripts normally through the Home Assistant UI, exactly as before, at the same time as an AI or collaborator edits individual files on GitHub.** Neither side loses anything.
 
 You do not need to understand git deeply to use this — the setup steps below explain everything you need to type.
 
 ## How it works
 
-There are two things being synced, and they behave slightly differently on purpose:
-
 | | Automations | Scripts |
 |---|---|---|
-| **Local file(s) Home Assistant actually reads** | The split files, one per automation | One single `scripts.yaml` |
-| **Can you edit it from the Home Assistant UI?** | No — see note below | Yes, exactly as normal |
-| **What GitHub sees** | The split files | The split files |
+| **Local file Home Assistant actually reads** | Single `automations.yaml` | Single `scripts.yaml` |
+| **Can you edit it from the Home Assistant UI?** | **Yes, exactly as normal** | **Yes, exactly as normal** |
+| **What GitHub sees** | One file per automation | One file per script |
 
-**Why the difference?** Home Assistant's own automation/script editor only lets you use the visual "click to edit" interface when everything lives in one file. For automations, we accepted the trade-off of losing that visual editor in exchange for clean, split files. For scripts, there's a trick that avoids the trade-off entirely: the split files only exist *temporarily*, purely to push to GitHub — locally, Home Assistant only ever sees `scripts.yaml`, so the UI editor keeps working normally.
+Both automations and scripts are handled the exact same way:
 
-Either way, from GitHub's point of view, both automations and scripts show up as clean, individual files — easy to read, easy to diff, easy for an AI to edit one at a time.
+- Locally, in `/config`, only the single flat file exists between syncs. Home Assistant only ever reads that file, so the built-in visual editor works completely normally.
+- The split files (one per automation/script) only exist *temporarily* on your Home Assistant machine, for the few seconds a sync is actually running — long enough to push them to GitHub. The rest of the time, they simply aren't there.
+- On GitHub, only the split files are visible — clean, individual, easy to read and easy for an AI to edit one at a time.
 
-**The sync runs in both directions.** If you edit something locally (through the UI, for scripts) or an AI edits a file directly on GitHub, the next sync picks it up and applies it on the other side automatically.
+**The sync runs in both directions.** If you edit something locally through the UI, the next sync splits it and pushes it to GitHub. If an AI (or anyone else) edits a file directly on GitHub, the next sync pulls it down and merges it back into your single local file, then tells Home Assistant to reload it.
 
 ## What's in this repo
 
 | File | What it does |
 |---|---|
-| `sync_automations.py` | Keeps `automations.yaml` and the split `automations/` files in agreement with each other. |
-| `sync_scripts.py` | Same idea, for `scripts.yaml` and a *temporary* `scripts/` folder. |
+| `sync_automations.py` | Keeps `automations.yaml` and the (temporary) split `automations/` files in agreement with each other. |
+| `sync_scripts.py` | Same idea, for `scripts.yaml` and a temporary `scripts/` folder. |
 | `git_sync.sh` | The main script. Talks to GitHub, decides what needs to happen, and calls the two Python scripts above. This is the one thing you actually run or schedule. |
 
 ## Requirements
@@ -93,7 +95,7 @@ Replace `<YOUR-TOKEN>`, `<your-username>`, and `<your-repo>` with your own detai
 
 ### 4. Copy the three files in
 
-Place `sync_automations.py`, `sync_scripts.py`, and `git_sync.sh` directly inside `/config` — **not** inside a subfolder like `/config/automations/` or `/config/scripts/**`, since those folders get automatically managed (and in the case of `scripts/`, periodically deleted and recreated) by the sync process itself.
+Place `sync_automations.py`, `sync_scripts.py`, and `git_sync.sh` directly inside `/config` — **not** inside `/config/automations/` or `/config/scripts/`, since those folders are automatically created and deleted by the sync process itself.
 
 ```bash
 chmod +x /config/git_sync.sh
@@ -111,30 +113,25 @@ automations.yaml
 scripts.yaml
 ```
 
-These are bookkeeping files the scripts use locally — none of them should ever end up on GitHub.
+These are either local bookkeeping files, or the flat files themselves (which are meant to stay local-only — only the split versions belong on GitHub).
 
 > If this repository also holds the rest of your Home Assistant configuration, also make sure your recorder database (`home-assistant_v2.db`), `.storage/`, and any `custom_components/` you installed through HACS are excluded too. Those are outside the scope of this tool, but a very common trip-up if you're setting up git for Home Assistant for the first time.
 
-### 6. Point Home Assistant at the split automation files
+### 6. Leave `configuration.yaml` as it already is
 
-Open `configuration.yaml` and make sure your automations line reads:
+Both automations and scripts should keep loading the normal way — a single `automation:` / `script:` setting pointing at (or implicitly using) `automations.yaml` and `scripts.yaml`. **Don't** point either one at a folder. That's the whole point of this setup: Home Assistant never needs to know the split files exist at all.
 
-```yaml
-automation: !include_dir_merge_list automations/
-```
+### 7. Do the one-time split
 
-**Leave your `script:` setting exactly as it already is.** Scripts are meant to keep loading from the single `scripts.yaml` file — that's the whole point of the design.
-
-### 7. Do the one-time split of your scripts
-
-This takes whatever's currently in `scripts.yaml` and creates the initial split files:
+This takes whatever's currently in each flat file and creates the initial split files, so there's something to push to GitHub on the very first sync:
 
 ```bash
 cd /config
+python3 sync_automations.py --bootstrap
 python3 sync_scripts.py --bootstrap
 ```
 
-You should see a message confirming how many scripts were split. (Automations don't need an equivalent step here — if you're starting fresh with this tool, an equivalent one-time split for automations should be done before pointing `configuration.yaml` at the folder in step 6.)
+You should see a message confirming how many automations/scripts were split into each folder.
 
 ### 8. Add the shell command
 
@@ -229,8 +226,8 @@ actions:
         sequence:
           - action: persistent_notification.create
             data:
-              title: "Automation validation failed"
-              message: "An automation is missing an id/alias, or two share one. Nothing was synced."
+              title: "Automation sync failed"
+              message: "An automation is missing an id/alias, two share one, or automations haven't been bootstrapped yet."
       - conditions:
           - condition: template
             value_template: "{{ 'scripts_exit_code=1' in result.stdout }}"
@@ -328,7 +325,8 @@ bash git_sync.sh
 You should see something like `git_relation=same` and `exit_code=0` / `scripts_exit_code=0` with no errors. Then check:
 
 - On GitHub, your repository should show `automations/` and `scripts/` folders full of individual files.
-- Locally, `ls /config` should show `scripts.yaml` but **no `scripts/` folder** — that only appears briefly while a sync is running.
+- Locally, `ls /config` should show `automations.yaml` and `scripts.yaml`, but **no `automations/` or `scripts/` folders** — those only appear briefly while a sync is running.
+- In the Home Assistant UI, open any automation or script and confirm you can still edit it exactly as before.
 
 If that all looks right, you're done. Let the hourly automation run on its own for a while, and check back that it's firing without errors.
 
@@ -336,8 +334,8 @@ If that all looks right, you're done. Let the hourly automation run on its own f
 
 Day to day, you don't need to do anything. The hourly automation handles it:
 
-- If you edited a script through the Home Assistant UI, it gets split and pushed to GitHub.
-- If a script or automation was changed directly on GitHub (by you, or by an AI you've pointed at the repo), it gets pulled down and applied to your running Home Assistant.
+- If you edited an automation or script through the Home Assistant UI, it gets split and pushed to GitHub.
+- If something was changed directly on GitHub (by you, or by an AI you've pointed at the repo), it gets pulled down and applied to your running Home Assistant, and reloaded automatically.
 - If both happened at once but touched *different* automations or scripts, both changes are kept — nothing is lost.
 
 You'll get a notification in Home Assistant any time something noteworthy happens (a sync failed, a conflict was found, etc.). No notification means everything is fine.
@@ -349,7 +347,7 @@ A conflict means the **same** automation or script was changed both locally and 
 You'll see a notification for this ("Automation conflict" or "Script conflict"). To resolve it, use the buttons from step 10 above, or run one of these directly:
 
 ```bash
-# Keep the version currently on Home Assistant, discard what's on GitHub
+# Keep the version currently in the Home Assistant UI, discard what's on GitHub
 bash /config/git_sync.sh --resolve automations local
 bash /config/git_sync.sh --resolve scripts local
 
@@ -364,9 +362,9 @@ There's a second, unrelated situation that looks similar but resolves itself aut
 
 ## Deleting an automation or script
 
-Delete the individual file (either directly on GitHub, or locally in the `automations/` folder — scripts don't have a persistent local folder to delete from, so delete it on GitHub instead, or edit `scripts.yaml` directly and let the sync catch up). The next sync picks up the deletion and removes it from Home Assistant automatically.
+Delete the individual file on GitHub, or edit the local `automations.yaml`/`scripts.yaml` file directly to remove it. The next sync picks up the deletion and removes it from Home Assistant automatically.
 
-**Don't rely on Home Assistant's own "Delete" button in the automations list** for automations — since they're split into individual files, it isn't confirmed to behave correctly. Deleting the file directly is the reliable way.
+For automations specifically, deleting through Home Assistant's own "Delete" button in the automations list should also work normally, exactly like any other single-file automation setup — since `automations.yaml` is the live, UI-editable file again.
 
 ## Troubleshooting
 
@@ -379,14 +377,11 @@ GitHub no longer accepts plain passwords for this. Make sure your token is embed
 **`ModuleNotFoundError: No module named 'yaml'` or similar.**
 This shouldn't happen — the scripts intentionally use the `PyYAML` package that ships with Home Assistant itself. If you see this, something about your Home Assistant installation is unusual; double check you're running the command as the same user/environment Home Assistant itself uses (test via **Developer Tools → Actions → `shell_command.git_sync`**, not just a manual terminal command).
 
-**An automation says "This automation cannot be edited from the UI."**
-Expected — see [How it works](#how-it-works) above. Edit the split file directly, or on GitHub, instead.
-
-**A sync keeps reporting `scripts_exit_code=3` and mentions "no baseline recorded."**
-You haven't run the one-time bootstrap step yet — see step 7.
+**A sync keeps reporting `exit_code=3` or `scripts_exit_code=3` and mentions "no baseline recorded."**
+You haven't run the one-time bootstrap step for that domain yet — see step 7.
 
 ## Good to know / limitations
 
 - **Comments in your YAML are not preserved.** Every sync rewrites the affected files fresh from the parsed data. If you rely on comments for notes, they won't survive a sync.
-- **`automations.yaml` is not actually used by Home Assistant** once you complete step 6 — it exists purely as internal bookkeeping for the sync scripts and is excluded from GitHub. Don't be surprised that editing it directly does nothing.
+- **The split folders (`automations/`, `scripts/`) only exist locally for a few seconds while a sync is running.** If you go looking for them in a file browser between syncs, you won't find them — that's expected, not a bug.
 - **This was built for one specific setup and workflow.** It works well for that, but it isn't a polished, general-purpose tool — expect to adjust it if your needs differ meaningfully from what's described here.
