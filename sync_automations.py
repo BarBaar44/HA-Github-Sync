@@ -4,7 +4,17 @@ sync_automations.py
 
 Bidirectional sync between Home Assistant's single automations.yaml
 (what the UI editor reads/writes) and automations/ (one file per
-automation, kept for clean git history).
+automation, kept for clean git history on GitHub).
+
+automations/ is NOT meant to persist permanently on local disk -- see
+git_sync.sh, which materializes it only for the duration of each sync
+run (restored from the last commit at the start, deleted again at the
+end -- except after a conflict or validation failure, when it's left
+in place so there's something to inspect) so that automations.yaml
+remains the only thing visible in /config between runs, and stays
+fully UI-editable. This script itself doesn't know or care about
+that -- it just reads/writes whatever's on disk at automations/ when
+it runs. This mirrors sync_scripts.py exactly.
 
 Uses PyYAML rather than ruamel.yaml deliberately: PyYAML ships with
 Home Assistant Core itself (HA cannot run without it), so this script
@@ -24,18 +34,29 @@ How it decides direction (normal mode, no --force):
   script does nothing to either file, prints a warning, and exits
   with code 2. Resolve manually (see --force below), then it'll sync
   cleanly next run.
-- On first run (no state file yet), it does not guess a direction --
-  it just records the current hashes as the baseline.
 
-Before touching anything (normal or forced), both sides are
-validated: every automation must have a unique id (or, failing that,
-a unique alias). Automations are keyed by id/alias internally, so a
-missing or duplicate key would otherwise cause one automation to
+Before touching anything (normal, forced, or bootstrap), both sides
+are validated: every automation must have a unique id (or, failing
+that, a unique alias). Automations are keyed by id/alias internally,
+so a missing or duplicate key would otherwise cause one automation to
 silently overwrite another on the next write. If validation fails,
 nothing is written -- fix the offending automation(s) and re-run.
 
 Usage:
     python3 sync_automations.py                # normal two-way sync
+    python3 sync_automations.py --bootstrap    # ONE-TIME: split the
+                                                # current
+                                                # automations.yaml
+                                                # into automations/
+                                                # and record the
+                                                # baseline. Refuses to
+                                                # run if automations/
+                                                # already has files
+                                                # in it. Run this
+                                                # once, manually,
+                                                # before relying on
+                                                # the scheduled
+                                                # automation.
     python3 sync_automations.py --force flat   # conflict resolution:
                                                 # skip the conflict
                                                 # check entirely,
@@ -60,8 +81,10 @@ Exit codes:
         needs automation.reload to pick it up
     2 - conflict detected, nothing changed, needs manual resolution
         (re-run with --force flat or --force split)
-    3 - validation failed (missing or duplicate id/alias) or a bad
-        --force argument, nothing changed, needs manual resolution
+    3 - validation failed (missing or duplicate id/alias), no
+        baseline recorded yet (normal mode only, run --bootstrap or
+        --force first), or a bad argument -- nothing changed, needs
+        manual resolution
 """
 import hashlib
 import re
@@ -181,14 +204,54 @@ def save_state(flat_hash: str, split_hash: str):
     )
 
 
+def bootstrap():
+    """One-time: split the current automations.yaml into automations/
+    and record the baseline state. Refuses to run if automations/
+    already has files in it, to avoid clobbering an existing split by
+    accident. (If you need to force-overwrite an existing split, use
+    --force flat instead -- it has no such guard rail.)"""
+    existing_split_files = list(SPLIT_DIR.glob("*.yaml")) if SPLIT_DIR.exists() else []
+    if existing_split_files:
+        print(
+            f"automations/ already contains {len(existing_split_files)} file(s) -- "
+            "refusing to bootstrap over existing data. Delete/move them first, "
+            "or use --force flat if you deliberately want to overwrite them.",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+
+    flat_automations = load_flat()
+    problems = validate(flat_automations, "automations.yaml")
+    if problems:
+        print("VALIDATION FAILED -- nothing changed:", file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+        sys.exit(3)
+
+    if not flat_automations:
+        print("automations.yaml is empty or missing -- nothing to bootstrap.")
+        sys.exit(0)
+
+    write_split(flat_automations)
+    flat_hash = canonical_hash(flat_automations)
+    split_hash = canonical_hash(load_split())
+    save_state(flat_hash, split_hash)
+    print(f"Bootstrapped: split {len(flat_automations)} automation(s) into {SPLIT_DIR}/")
+    sys.exit(0)
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--bootstrap":
+        bootstrap()
+        return
+
     force = None
     if len(sys.argv) > 1:
         if sys.argv[1] == "--force" and len(sys.argv) > 2 and sys.argv[2] in ("flat", "split"):
             force = sys.argv[2]
         else:
             print(f"Unrecognized arguments: {sys.argv[1:]}", file=sys.stderr)
-            print("Usage: sync_automations.py [--force flat|split]", file=sys.stderr)
+            print("Usage: sync_automations.py [--bootstrap | --force flat|split]", file=sys.stderr)
             sys.exit(3)
 
     flat_automations = load_flat()
@@ -212,7 +275,7 @@ def main():
         save_state(current_flat_hash, new_split_hash)
         print(
             f"FORCED automations.yaml -> automations/ "
-            f"({len(flat_automations)} automations). automations/ discarded."
+            f"({len(flat_automations)} automations). automations/ edits discarded."
         )
         sys.exit(0)
 
@@ -230,11 +293,13 @@ def main():
     last_flat_hash = state.get("last_flat_hash")
     last_split_hash = state.get("last_split_hash")
 
-    # First run -- no baseline yet. Don't guess, just record.
     if last_flat_hash is None and last_split_hash is None:
-        save_state(current_flat_hash, current_split_hash)
-        print("First run: recorded baseline, no sync performed.")
-        sys.exit(0)
+        print(
+            "No baseline recorded yet. Run 'python3 sync_automations.py --bootstrap' "
+            "once first.",
+            file=sys.stderr,
+        )
+        sys.exit(3)
 
     flat_changed = current_flat_hash != last_flat_hash
     split_changed = current_split_hash != last_split_hash
@@ -254,7 +319,6 @@ def main():
         sys.exit(2)
 
     if flat_changed:
-        # UI (or direct edit) changed automations.yaml -> regenerate split files.
         write_split(flat_automations)
         new_split_hash = canonical_hash(load_split())
         save_state(current_flat_hash, new_split_hash)
@@ -262,12 +326,10 @@ def main():
         sys.exit(0)
 
     if split_changed:
-        # Split file edited directly -> regenerate automations.yaml.
         write_flat(split_automations)
         new_flat_hash = canonical_hash(load_flat())
         save_state(new_flat_hash, current_split_hash)
         print(f"Synced automations/ -> automations.yaml ({len(split_automations)} automations).")
-        # Signal that HA needs to reload automations to pick this up.
         sys.exit(1)
 
 

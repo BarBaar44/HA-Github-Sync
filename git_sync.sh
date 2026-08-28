@@ -1,11 +1,10 @@
 #!/bin/bash
 # git_sync.sh
 #
-# NOTE: this file must NOT live inside /config/scripts/ -- that
-# directory is the transient split target for scripts.yaml (see
-# below) and gets rm -rf'd at the end of most runs. Keep this script
-# directly in /config/ (or anywhere outside /config/scripts/ and
-# /config/automations/).
+# NOTE: this file must NOT live inside /config/scripts/ or
+# /config/automations/ -- both of those directories are transient
+# split targets (see below) and get rm -rf'd at the end of most runs.
+# Keep this script directly in /config/.
 #
 # Usage:
 #   bash git_sync.sh
@@ -17,7 +16,7 @@
 #       Manual conflict resolution. Use when a previous run reported
 #       exit_code=2 (automations) or scripts_exit_code=2 (scripts).
 #         local -> keep the flat file (automations.yaml / scripts.yaml,
-#                  whatever's live in HA / the UI right now), discard
+#                  whatever's live in the UI right now), discard
 #                  whatever's different on the split/GitHub side.
 #         git   -> keep the split files (whatever's on GitHub right
 #                  now), discard whatever's different in the flat
@@ -25,26 +24,21 @@
 #       Runs the normal fetch/merge/reconcile/push flow immediately
 #       afterward, so this is a one-shot "resolve and re-sync."
 #
-# Covers two domains, handled differently on purpose:
+# BOTH domains work identically, by design:
 #
 #   automations.yaml <-> automations/
-#     Both persist permanently on local disk. configuration.yaml
-#     points at automations/ via !include_dir_merge_list, so HA
-#     itself reads the split files directly. Trade-off (accepted
-#     earlier): automations can't be edited from the UI, since HA
-#     only supports UI-editing when everything's in one file.
+#   scripts.yaml      <-> scripts/
 #
-#   scripts.yaml <-> scripts/
-#     Only scripts.yaml persists locally between runs. scripts/ is
-#     materialized on disk ONLY for the duration of this script's
-#     run (restored from the last commit at the start, deleted again
-#     at the end -- UNLESS this run ended in a conflict or validation
-#     failure, in which case scripts/ is left in place so there's
-#     something to inspect/resolve) -- purely so it can be committed
-#     and pushed to GitHub. configuration.yaml never references
-#     scripts/ at all, so HA only ever reads scripts.yaml and
-#     UI-editing scripts keeps working normally, with zero
-#     special-casing.
+# In both cases, only the flat file (automations.yaml / scripts.yaml)
+# persists locally between runs. configuration.yaml points at the
+# flat file only -- NOT at the split folder -- so Home Assistant's
+# own UI editor keeps working normally for both automations and
+# scripts. The split folder is materialized on disk ONLY for the
+# duration of this script's run (restored from the last commit at the
+# start, deleted again at the end -- UNLESS this run ended in a
+# conflict or validation failure, in which case it's left in place so
+# there's something to inspect) -- purely so it can be committed and
+# pushed to GitHub as individual files.
 #
 # Git-level pull/merge/divergence handling is domain-agnostic (one
 # repo, one fetch, one merge-base check) and unaffected by any of the
@@ -78,7 +72,7 @@
 #   GIT_FETCH_FAILED              - couldn't reach GitHub, nothing else ran
 #   GIT_MERGE_FAILED              - fast-forward merge from remote failed;
 #                                   nothing else ran
-#   GIT_RESOLVE_BAD_ARGS           - --resolve given with a bad domain or
+#   GIT_RESOLVE_BAD_ARGS          - --resolve given with a bad domain or
 #                                   direction; nothing ran
 #   DIVERGED_MERGED_CLEAN         - both sides had independent commits,
 #                                   but touched different files -- merged
@@ -127,11 +121,11 @@ if ! mkdir "$LOCKDIR" 2>/dev/null; then
 fi
 trap 'rmdir "$LOCKDIR" 2>/dev/null' EXIT
 
-# Restore scripts/ from the last commit (undoes the previous run's
-# cleanup, or brings it back if a prior conflict left it in place) so
-# the working tree is clean before we fetch/merge. Harmless no-op if
-# scripts/ isn't tracked yet. automations/ needs no equivalent step --
-# it's never deleted between runs.
+# Restore both split folders from the last commit (undoes the
+# previous run's cleanup, or brings them back if a prior conflict
+# left them in place) so the working tree is clean before we
+# fetch/merge. Harmless no-op if either isn't tracked yet.
+git checkout HEAD -- automations/ 2>/dev/null
 git checkout HEAD -- scripts/ 2>/dev/null
 
 if ! git fetch origin main; then
@@ -195,8 +189,8 @@ if [ "$RESOLVE_DOMAIN" = "automations" ]; then
 else
     python3 sync_automations.py
 fi
-sync_exit=$?
-echo "exit_code=$sync_exit"
+automations_exit=$?
+echo "exit_code=$automations_exit"
 
 # Same for scripts.
 if [ "$RESOLVE_DOMAIN" = "scripts" ]; then
@@ -219,11 +213,16 @@ elif [ "$RELATION" = "local_ahead" ]; then
     git push
 fi
 
-# Remove scripts/ from local disk so /config only shows scripts.yaml
-# between runs -- UNLESS this run ended in a conflict (2) or
-# validation failure (3), in which case leave it in place so there's
-# something to inspect. (A --resolve run always ends in 0 or 1, so
-# cleanup always proceeds after a successful resolve.)
+# Remove both split folders from local disk so /config only shows
+# automations.yaml and scripts.yaml between runs -- UNLESS a domain's
+# run ended in a conflict (2) or validation failure (3), in which
+# case that domain's split folder is left in place so there's
+# something to inspect. (A --resolve run always ends in 0 or 1 for
+# the resolved domain, so cleanup always proceeds after a successful
+# resolve.)
+if [ "$automations_exit" != "2" ] && [ "$automations_exit" != "3" ]; then
+    rm -rf /config/automations
+fi
 if [ "$scripts_exit" != "2" ] && [ "$scripts_exit" != "3" ]; then
     rm -rf /config/scripts
 fi
